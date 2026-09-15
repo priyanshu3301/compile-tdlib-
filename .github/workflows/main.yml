@@ -1,0 +1,74 @@
+name: Compile TDLib for Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      td_ref:
+        description: "TDLib git ref (tag/branch/commit) to build"
+        required: false
+        default: "master"
+
+# Avoid duplicate hour-long builds if triggered twice
+concurrency:
+  group: tdlib-android-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180   # hard stop so a hang doesn't burn your whole Actions quota
+
+    steps:
+      - name: Free up disk space
+        run: |
+          # Android builds are disk-hungry; remove preinstalled bloat we don't need
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk-bundle \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h
+
+      - name: Install System Dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y make git zlib1g-dev libssl-dev gperf php-cli cmake clang default-jdk perl
+
+      - name: Clone official TDLib repository
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "${{ github.event.inputs.td_ref || 'master' }}" \
+            https://github.com/tdlib/td.git
+
+      - name: Cache Android SDK/NDK download
+        uses: actions/cache@v4
+        with:
+          path: td/example/android/android-sdk
+          key: android-sdk-${{ runner.os }}-${{ hashFiles('td/example/android/fetch-sdk.sh') }}
+
+      - name: Compile TDLib (this will take ~1 to 1.5 hours)
+        working-directory: td/example/android
+        run: |
+          set -euo pipefail
+          bash check-environment.sh
+          bash fetch-sdk.sh
+          bash build-openssl.sh
+          bash build-tdlib.sh
+
+      - name: Verify build output exists
+        working-directory: td/example/android
+        run: |
+          set -euo pipefail
+          if [ -z "$(find tdlib -name '*.so' 2>/dev/null)" ]; then
+            echo "::error::No .so files found — build likely failed silently."
+            exit 1
+          fi
+          echo "Build artifacts found:"
+          find tdlib -name '*.so'
+
+      - name: Upload Compiled .so Files as ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-android-binaries
+          path: td/example/android/tdlib/
+          retention-days: 7
+          if-no-files-found: error   # fail loudly instead of uploading an empty artifact
